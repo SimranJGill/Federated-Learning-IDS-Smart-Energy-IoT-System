@@ -1,0 +1,434 @@
+Complete Line-by-Line Explanation of
+Your Multi-Class Federated IDS Project
+Overview of What Your Final System Does
+Your project is a Federated Intrusion Detection System (IDS) using:
+1. NSL-KDD dataset (5 classes)
+2. Parallel CNN + LSTM model for multi-class attack detection
+3. Federated Learning (FedAvg) with 3 clients
+4. CrossEntropyLoss for multi-class training
+5. Evaluation + visualization (accuracy, F1, confusion matrix)
+Classes being predicted
+Label encoder mapped 5 categories:
+● Normal traffic
+● DoS (Denial of Service)
+● Probe
+● R2L (Remote to Local)
+● U2R (User to Root)
+PART 1 — DATA PREPROCESSING
+(preprocess_nsl_kdd.py)
+Loading libraries
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+Why these?
+pandas
+Used for:
+● reading raw dataset (read_csv)
+● manipulating columns
+● encoding labels
+Alternative:
+● Python csv module (too primitive)
+● Polars (faster, but less standard)
+numpy
+Used for:
+● matrices / arrays
+● saving .npy files
+● feeding PyTorch
+Alternative:
+● native lists (slow)
+● PyTorch tensors directly (possible, but preprocessing easier in numpy)
+LabelEncoder
+Converts string labels:
+normal → 1
+probe → 2
+because neural networks need numeric targets.
+Alternative:
+● manual mapping dictionary
+● OneHotEncoder (less ideal for CrossEntropy)
+We chose LabelEncoder because CrossEntropyLoss expects integer class indices.
+StandardScaler
+Standardizes features:
+Formula:
+z-score normalization:
+[
+z = \frac{x-\mu}{\sigma}
+]
+genui{"math_block_widget_always_prefetch_v2":{"content":"z=\frac{x-\mu}{\sigma}"}}
+Why?
+● prevents large-scale features dominating
+● stabilizes training
+● helps CNN/LSTM converge
+Alternative:
+● MinMax scaling
+● RobustScaler
+We used StandardScaler because intrusion features vary heavily.
+Reading dataset
+train_df = pd.read_csv("data/KDDTrain+.txt", names=columns)
+● Loads NSL-KDD training file.
+● names=columns assigns feature names.
+Same for:
+test_df = pd.read_csv(...)
+Encoding categorical columns
+Columns like:
+protocol_type
+service
+flag
+contain strings.
+Neural nets cannot process strings.
+So:
+LabelEncoder().fit_transform()
+converts:
+tcp -> 0
+udp -> 1
+Attack grouping into 5 classes
+Raw NSL-KDD has many attacks.
+You grouped them:
+back, neptune -> dos
+ipsweep -> probe
+ftp_write -> r2l
+buffer_overflow -> u2r
+Why?
+Standard NSL-KDD benchmark uses 5-class taxonomy.
+Save processed arrays
+np.save("data/X_train.npy", X_train)
+Saves preprocessed features.
+Why .npy?
+● fast loading
+● preserves matrix structure
+● much faster than csv
+Alternative:
+● pickle
+● parquet
+● torch.save()
+PART 2 — MODEL (models/model.py)
+Imports
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+torch
+Core tensor library.
+Equivalent of numpy + GPU.
+nn
+Contains layers:
+nn.Conv1d
+nn.LSTM
+nn.Linear
+Model definition
+class IDSModel(nn.Module):
+Everything in PyTorch inherits from:
+nn.Module
+This enables:
+● backpropagation
+● parameter tracking
+● .to(device)
+● .state_dict()
+Constructor
+def __init__(self,input_size,num_classes):
+Arguments:
+● input_size
+Number of features.
+● num_classes=5
+Output classes.
+CNN Branch
+First convolution
+self.conv1 = nn.Conv1d(1,32,kernel_size=3,padding=1)
+Meaning:
+1 input channel
+32 filters
+window size 3
+padding keeps size.
+What it does:
+Learns local feature patterns.
+Example:
+May learn suspicious feature combinations.
+Alternative:
+● kernel 5
+● more filters 64
+● Conv2d (not suitable here)
+Why Conv1d?
+Because intrusion features are a feature sequence.
+Second convolution
+self.conv2 = nn.Conv1d(32,64,...)
+Expands learned representation.
+32 → 64 channels.
+Deeper abstraction.
+Pooling
+self.pool = nn.MaxPool1d(2)
+Reduces dimension by half.
+Why?
+● reduces noise
+● fewer parameters
+● some translational robustness
+Alternative:
+● Average pooling
+● strided convolution
+Global Average Pooling
+self.gap = nn.AdaptiveAvgPool1d(1)
+Compresses:
+(batch,64,seq)
+into
+(batch,64)
+Why used instead of flatten?
+Because flatten can explode parameters.
+Alternative we rejected:
+flatten(start_dim=1)
+GAP is cleaner.
+LSTM Branch
+self.lstm = nn.LSTM(
+input_size=1,
+hidden_size=64,
+num_layers=1,
+batch_first=True)
+Why LSTM?
+Captures dependencies among features.
+LSTM equations:
+Forget gate:
+genui{"math_block_widget_always_prefetch_v2":{"content":"f_t=\sigma(W_f[h_{t-1},x_t]+b_f)"}}
+Input gate:
+genui{"math_block_widget_always_prefetch_v2":{"content":"i_t=\sigma(W_i[h_{t-1},x_t]+b_i)"}}
+Why not vanilla RNN?
+Vanishing gradient issue.
+Why not GRU?
+GRU possible alternative.
+LSTM chosen because stronger memory.
+Hidden size 64
+hidden_size=64
+Produces 64 learned temporal features.
+Alternative:
+32 or 128.
+Fusion layer
+torch.cat((cnn_x,lstm_x),dim=1)
+Concatenates:
+64 CNN features
++
+64 LSTM features
+128
+Parallel fusion.
+This is what makes architecture parallel.
+Fully connected
+self.fc1 = nn.Linear(128,128)
+Learns interactions after fusion.
+Dropout
+self.dropout = nn.Dropout(0.3)
+Randomly drops neurons during training.
+30%.
+Why?
+Prevents overfitting.
+Alternative:
+0.5 common too.
+Output layer
+self.fc2 = nn.Linear(128,num_classes)
+Produces:
+(batch,5)
+logits.
+NOT probabilities yet.
+Because CrossEntropyLoss applies softmax internally.
+Very important.
+Forward Pass
+CNN branch
+cnn_x = F.relu(self.conv1(x))
+ReLU:
+genui{"math_block_widget_always_prefetch_v2":{"content":"f(x)=\max(0,x)"}}
+Why ReLU?
+● simple
+● fast
+● avoids saturation
+Alternative:
+LeakyReLU
+GELU
+GAP
+cnn_x = self.gap(cnn_x).squeeze(-1)
+removes extra dimension.
+LSTM reshape
+lstm_x = x.permute(0,2,1)
+Changes:
+(batch,1,features)
+into
+(batch,features,1)
+because LSTM expects:
+(batch,seq,input_dim)
+Last hidden state
+lstm_x = lstm_out[:,-1,:]
+Take final sequence summary.
+PART 3 — TRAINING (train.py)
+Device selection
+device = torch.device("cuda" if ... else "cpu")
+GPU if available.
+Else CPU.
+Load processed arrays
+X_train=np.load(...)
+Loads preprocessed data.
+Convert labels
+dtype=torch.long
+Why long?
+CrossEntropyLoss requires integer class indices.
+Not float.
+Add channel dim
+X_train = X_train.unsqueeze(1)
+Changes:
+(batch,features)
+→
+(batch,1,features)
+needed for Conv1D.
+DataLoader
+loader = DataLoader(...,batch_size=256,shuffle=True)
+batch_size 256:
+Tradeoff speed vs memory.
+shuffle=True:
+randomizes batch order.
+This is normal randomness.
+Not poisoning.
+Loss function
+criterion = torch.nn.CrossEntropyLoss()
+Multi-class classification loss.
+Formula:
+genui{"math_block_widget_always_prefetch_v2":{"content":"L=-\sum_i y_i\log(p_i)"}}
+Why not BCELoss?
+BCELoss only binary.
+Optimizer
+Adam(...)
+Adaptive learning rates.
+Why Adam?
+● faster convergence
+● robust defaults
+Alternatives:
+● SGD
+● RMSProp
+Adam chosen for practicality.
+Backprop
+loss.backward()
+optimizer.step()
+Computes gradients.
+Updates weights.
+Core learning step.
+PART 4 — FEDERATED CLIENT
+Flower import
+import flwr as fl
+Federated learning framework.
+NumPyClient
+class IDSClient(fl.client.NumPyClient)
+Implements 3 required methods:
+● get_parameters()
+● fit()
+● evaluate()
+get_parameters
+model.state_dict()
+Extracts weights.
+Sent to server.
+set_parameters
+Loads global weights from server.
+fit()
+Local client training.
+Each client trains locally.
+Never sends raw data.
+Only sends model updates.
+That is federated learning.
+evaluate()
+preds=torch.argmax(outputs,dim=1)
+Why argmax?
+Pick class with highest score.
+Alternative:
+softmax + argmax
+argmax enough.
+PART 5 — SERVER (server.py)
+FedAvg
+strategy = fl.server.strategy.FedAvg(...)
+Federated Averaging.
+Global update:
+genui{"math_block_widget_always_prefetch_v2":{"content":"w_{t+1}=\sum_k \frac{n_k}{n}
+w_k"}}
+Weighted average of client models.
+Why FedAvg?
+Standard baseline.
+Simple.
+Widely accepted.
+Alternatives:
+● FedProx
+● FedAdam
+● FedNova
+FedAvg chosen because stable baseline.
+Metrics aggregation
+np.median(values)
+Uses median.
+Why not mean?
+Median robust to outliers.
+Good choice.
+PART 6 — WHY PARALLEL CNN + LSTM?
+Sequential old:
+CNN -> LSTM
+Problem:
+LSTM only sees CNN-transformed features.
+Parallel new:
+CNN || LSTM -> Fusion
+Both learn independently.
+CNN learns:
+● spatial/local feature patterns
+LSTM learns:
+● dependencies
+Fusion combines complementary signals.
+Better.
+PART 7 — Alternatives You Could Have
+Used
+Instead of CNN
+Could use:
+● MLP
+● Transformer encoder
+● Autoencoder
+Instead of LSTM
+Could use:
+● GRU
+● Transformer
+● Temporal CNN
+Instead of Fusion concat
+Could use:
+● attention fusion
+● gated fusion
+● weighted sum
+Instead of CrossEntropy
+Could use:
+● Focal Loss (better for imbalance)
+● Class weighted loss
+PART 8 — Weaknesses / Future
+Improvements
+Current limitation:
+● U2R poorly detected
+● class imbalance
+Possible fixes:
+● SMOTE
+● class weighting
+● focal loss
+● robust aggregation
+Final Pipeline Summary
+NSL-KDD
+↓
+Preprocessing
+↓
+Parallel CNN + LSTM Model
+↓
+CrossEntropy Training
+↓
+Federated Clients
+↓
+FedAvg Server Aggregation
+↓
+Metrics + Confusion Matrix
+This is the full system.
+Viva Questions You May Get
+Why CrossEntropy instead of BCELoss?
+Because problem is multi-class.
+BCELoss is binary.
+Why CNN and LSTM together?
+CNN captures local patterns.
+LSTM captures dependencies.
+Fusion improves representation.
+Why FedAvg?
+Standard federated baseline.
+Simple and effective.
+Why Global Average Pooling instead of flatten?
+Fewer parameters.
+Less overfitting.
+Cleaner fusion.
+Why accuracy ~73 but U2R weak?
+Class imbalance in NSL-KDD.
+Rare attack problem.
+This covers essentially every major line and design decision in your project.
